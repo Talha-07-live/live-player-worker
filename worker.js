@@ -2,16 +2,43 @@
 
 export default {
   async fetch(req) {
-    // 👉 এখানে তোমার iframe লিঙ্ক বসাও
-    const IFRAME_URL = "https://topembed.pw/channel/WillowXtra2%5BUSA%5D";
+    const url = new URL(req.url);
 
-    // Extract HLS from the iframe page
+    // 🔍 Debug mode → ?debug=1 দিলে candidate list JSON আকারে পাবে
+    if (url.searchParams.get("debug") === "1") {
+      const { all } = await extractHls(IFRAME_URL, req);
+      return new Response(JSON.stringify({ candidates: all }, null, 2), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Optional proxy (for CORS bypass)
+    if (url.pathname === "/proxy") {
+      const raw = url.searchParams.get("url");
+      if (!raw) return new Response("Missing url", { status: 400 });
+      const upstream = await fetch(raw, {
+        headers: {
+          "User-Agent": req.headers.get("user-agent") || "Mozilla/5.0",
+          "Referer": "https://topembed.pw/", // কিছু সাইট রেফারার চায়
+          "Origin": "https://topembed.pw"
+        },
+      });
+      const h = new Headers(upstream.headers);
+      h.set("Access-Control-Allow-Origin", "*");
+      h.delete("set-cookie");
+      return new Response(upstream.body, { status: upstream.status, headers: h });
+    }
+
+    // 🎯 তোমার iframe URL এখানে বসাও
+    const IFRAME_URL = "https://topembed.pw/channel/WillowXtra2[USA]";
+
+    // Extract HLS link
     const { hls } = await extractHls(IFRAME_URL, req);
     if (!hls) {
       return new Response("❌ No HLS/M3U8 found", { status: 404 });
     }
 
-    // Serve advanced player page
+    // Serve player
     return new Response(playerHtml(hls), {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
@@ -19,7 +46,7 @@ export default {
 };
 
 // ==========================
-// ADVANCED HLS EXTRACTOR
+// ADVANCED EXTRACTOR
 // ==========================
 async function extractHls(pageUrl, req) {
   const res = await fetch(pageUrl, {
@@ -34,27 +61,17 @@ async function extractHls(pageUrl, req) {
 
   const candidates = new Set();
 
-  // 1) Direct .m3u8 links
+  // Different patterns
   matchAll(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi, html).forEach(u => candidates.add(cleanUrl(u)));
-
-  // 2) data-file / data-src attributes
   matchAll(/data-(?:file|src)=["'](https?:[^"']+\.m3u8[^"']*)["']/gi, html).forEach(u => candidates.add(cleanUrl(u)));
-
-  // 3) JavaScript configs
   matchAll(/\bsrc\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/gi, html).forEach(u => candidates.add(cleanUrl(u)));
-
-  // 4) sources: [{src:"..."}]
   matchAll(/sources\s*:\s*\[\s*\{[^}]*?src\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/gis, html).forEach(u => candidates.add(cleanUrl(u)));
-
-  // 5) JSON strings
   matchAll(/"(https?:[^"']+\.m3u8[^"']*)"/gi, html).forEach(u => candidates.add(cleanUrl(u)));
-
-  // 6) Escaped (https:\/\/...)
   matchAll(/https?:\\\/\\\/[^"']+?\.m3u8[^"']*/gi, html).forEach(u => {
     try { candidates.add(cleanUrl(u.replace(/\\\//g, "/"))); } catch {}
   });
 
-  // 7) Relative URLs → absolute
+  // Relative → absolute
   const regexPlaylist = /["']([^"']+\.m3u8[^"']*)["']/gi;
   matchAll(regexPlaylist, html).forEach(u => {
     if (!/^https?:/.test(u)) {
@@ -62,7 +79,7 @@ async function extractHls(pageUrl, req) {
     }
   });
 
-  // Filter ads/tracker hosts
+  // Filter ads
   const DENY = ["doubleclick.net", "googlesyndication.com", "adservice.google.com"];
   const filtered = Array.from(candidates).filter(u => {
     try {
@@ -71,7 +88,6 @@ async function extractHls(pageUrl, req) {
     } catch { return false; }
   });
 
-  // Rank and pick best
   filtered.sort((a, b) => scoreUrl(b) - scoreUrl(a));
   return { hls: filtered[0] || null, all: filtered };
 }
@@ -105,7 +121,7 @@ function scoreUrl(u) {
 }
 
 // ==========================
-// PLYR + HLS.JS PLAYER PAGE
+// PLAYER HTML
 // ==========================
 function playerHtml(hlsUrl) {
   return `<!DOCTYPE html>
@@ -127,15 +143,19 @@ function playerHtml(hlsUrl) {
   const video=document.getElementById('v');
   const player=new Plyr(video);
   const hlsUrl=${JSON.stringify(hlsUrl)};
-  if(Hls.isSupported()){
-    const hls=new Hls({ liveSyncDuration:4, liveMaxLatencyDuration:10 });
-    hls.attachMedia(video);
-    hls.loadSource(hlsUrl);
-  } else if(video.canPlayType('application/vnd.apple.mpegurl')){
-    video.src=hlsUrl;
+  function load(url){
+    if(Hls.isSupported()){
+      const hls=new Hls({ liveSyncDuration:4, liveMaxLatencyDuration:10 });
+      hls.attachMedia(video);
+      hls.loadSource("/proxy?url="+encodeURIComponent(url));
+    } else if(video.canPlayType('application/vnd.apple.mpegurl')){
+      video.src="/proxy?url="+encodeURIComponent(url);
+    } else {
+      alert("HLS not supported");
+    }
   }
+  load(hlsUrl);
 </script>
 </body>
 </html>`;
     }
-  

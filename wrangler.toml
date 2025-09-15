@@ -1,3 +1,3 @@
-name = "live-player"
+name = "livecom"
 main = "worker.js"
 compatibility_date = "2025-09-01"
